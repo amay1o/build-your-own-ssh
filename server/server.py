@@ -1,14 +1,14 @@
 import socket
-import os
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from cryptography.hazmat.primitives.asymmetric import padding
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
+
 HOST = "127.0.0.1"
 PORT = 5555
-
-KEY = b"0123456789abcdef0123456789abcdef"
-
-aes = AESGCM(KEY)
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -24,17 +24,56 @@ client_socket, client_address = server.accept()
 
 print(f"[+] Connection from {client_address}")
 
+# LOAD SERVER PRIVATE KEY
+with open("keys/server_private.pem", "rb") as f:
+    private_key = serialization.load_pem_private_key(
+        f.read(),
+        password=None
+    )
+
+# LOAD SERVER PUBLIC KEY
+with open("keys/server_public.pem", "rb") as f:
+    public_key_data = f.read()
+
+# SEND PUBLIC KEY TO CLIENT
+client_socket.send(public_key_data)
+
+# RECEIVE ENCRYPTED AES SESSION KEY
+encrypted_session_key = client_socket.recv(1024)
+
+# DECRYPT SESSION KEY USING RSA PRIVATE KEY
+session_key = private_key.decrypt(
+    encrypted_session_key,
+    padding.OAEP(
+        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+        algorithm=hashes.SHA256(),
+        label=None
+    )
+)
+
+print("[*] AES session key securely received.")
+
+aes = AESGCM(session_key)
+
+# RECEIVE ENCRYPTED MESSAGE
 data = client_socket.recv(1024)
 
 nonce = data[:12]
 
 ciphertext = data[12:]
 
-plaintext = aes.decrypt(nonce, ciphertext, None)
+plaintext = aes.decrypt(
+    nonce,
+    ciphertext,
+    None
+)
 
 print("[CLIENT]:", plaintext.decode())
 
-reply = "Encrypted hello from server!"
+# SEND ENCRYPTED REPLY
+reply = "Secure RSA key exchange successful!"
+
+import os
 
 reply_nonce = os.urandom(12)
 
