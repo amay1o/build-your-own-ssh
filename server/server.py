@@ -1,6 +1,6 @@
 import socket
 import os
-
+import subprocess
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -39,7 +39,7 @@ with open("keys/server_private.pem", "rb") as f:
 with open("keys/server_public.pem", "rb") as f:
     server_public_key_data = f.read()
 
-# SEND SERVER PUBLIC KEY TO CLIENT
+# SEND SERVER PUBLIC KEY
 client_socket.send(server_public_key_data)
 
 print("[*] Server public key sent.")
@@ -47,7 +47,7 @@ print("[*] Server public key sent.")
 # RECEIVE ENCRYPTED AES SESSION KEY
 encrypted_session_key = client_socket.recv(4096)
 
-# DECRYPT AES SESSION KEY USING RSA
+# DECRYPT AES SESSION KEY
 session_key = server_private_key.decrypt(
     encrypted_session_key,
     padding.OAEP(
@@ -71,7 +71,6 @@ aes = AESGCM(session_key)
 # GENERATE RANDOM CHALLENGE
 challenge = os.urandom(32)
 
-# ENCRYPT CHALLENGE
 challenge_nonce = os.urandom(12)
 
 encrypted_challenge = aes.encrypt(
@@ -80,7 +79,6 @@ encrypted_challenge = aes.encrypt(
     None
 )
 
-# SEND NONCE + CIPHERTEXT
 client_socket.send(
     challenge_nonce + encrypted_challenge
 )
@@ -90,7 +88,7 @@ print("[*] Authentication challenge sent.")
 # RECEIVE SIGNATURE
 signature = client_socket.recv(4096)
 
-# LOAD CLIENT PUBLIC KEY DIRECTLY
+# LOAD CLIENT PUBLIC KEY
 with open("keys/client_public.pem", "rb") as f:
     client_public_key = serialization.load_pem_public_key(
         f.read()
@@ -113,7 +111,6 @@ try:
 
     print("[+] Client authentication successful.")
 
-    # SEND AUTH SUCCESS
     success_nonce = os.urandom(12)
 
     success_message = aes.encrypt(
@@ -131,7 +128,6 @@ except Exception as e:
     print("[-] Authentication failed.")
     print(e)
 
-    # SEND AUTH FAILED
     fail_nonce = os.urandom(12)
 
     fail_message = aes.encrypt(
@@ -142,6 +138,68 @@ except Exception as e:
 
     client_socket.send(
         fail_nonce + fail_message
+    )
+
+    client_socket.close()
+    server.close()
+    exit()
+
+# =========================
+# REMOTE SHELL PHASE
+# =========================
+
+while True:
+
+    # RECEIVE ENCRYPTED COMMAND
+    data = client_socket.recv(4096)
+
+    command_nonce = data[:12]
+
+    command_ciphertext = data[12:]
+
+    command = aes.decrypt(
+        command_nonce,
+        command_ciphertext,
+        None
+    ).decode()
+
+    print(f"[CLIENT COMMAND]: {command}")
+
+    # EXIT COMMAND
+    if command.lower() == "exit":
+        print("[*] Client disconnected.")
+        break
+
+    try:
+
+        # EXECUTE COMMAND
+        result = subprocess.run(
+            command.split(),
+            capture_output=True,
+            text=True
+        )
+
+        output = result.stdout + result.stderr
+
+        if output == "":
+            output = "[*] Command executed with no output."
+
+    except Exception as e:
+
+        output = f"Error executing command: {str(e)}"
+
+    # ENCRYPT OUTPUT
+    output_nonce = os.urandom(12)
+
+    encrypted_output = aes.encrypt(
+        output_nonce,
+        output.encode(),
+        None
+    )
+
+    # SEND NONCE + CIPHERTEXT
+    client_socket.send(
+        output_nonce + encrypted_output
     )
 
 # CLOSE CONNECTION
