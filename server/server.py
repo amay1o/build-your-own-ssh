@@ -1,4 +1,6 @@
 import socket
+import os
+
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -10,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 HOST = "127.0.0.1"
 PORT = 5555
 
+# CREATE SERVER SOCKET
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -20,32 +23,37 @@ server.listen()
 
 print(f"[*] Server listening on {HOST}:{PORT}")
 
+# ACCEPT CLIENT
 client_socket, client_address = server.accept()
 
 print(f"[+] Connection from {client_address}")
 
 # LOAD SERVER PRIVATE KEY
 with open("keys/server_private.pem", "rb") as f:
-    private_key = serialization.load_pem_private_key(
+    server_private_key = serialization.load_pem_private_key(
         f.read(),
         password=None
     )
 
 # LOAD SERVER PUBLIC KEY
 with open("keys/server_public.pem", "rb") as f:
-    public_key_data = f.read()
+    server_public_key_data = f.read()
 
-# SEND PUBLIC KEY TO CLIENT
-client_socket.send(public_key_data)
+# SEND SERVER PUBLIC KEY TO CLIENT
+client_socket.send(server_public_key_data)
+
+print("[*] Server public key sent.")
 
 # RECEIVE ENCRYPTED AES SESSION KEY
-encrypted_session_key = client_socket.recv(1024)
+encrypted_session_key = client_socket.recv(4096)
 
-# DECRYPT SESSION KEY USING RSA PRIVATE KEY
-session_key = private_key.decrypt(
+# DECRYPT AES SESSION KEY USING RSA
+session_key = server_private_key.decrypt(
     encrypted_session_key,
     padding.OAEP(
-        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+        mgf=padding.MGF1(
+            algorithm=hashes.SHA256()
+        ),
         algorithm=hashes.SHA256(),
         label=None
     )
@@ -53,38 +61,90 @@ session_key = private_key.decrypt(
 
 print("[*] AES session key securely received.")
 
+# CREATE AES OBJECT
 aes = AESGCM(session_key)
 
-# RECEIVE ENCRYPTED MESSAGE
-data = client_socket.recv(1024)
+# =========================
+# AUTHENTICATION PHASE
+# =========================
 
-nonce = data[:12]
+# GENERATE RANDOM CHALLENGE
+challenge = os.urandom(32)
 
-ciphertext = data[12:]
+# ENCRYPT CHALLENGE
+challenge_nonce = os.urandom(12)
 
-plaintext = aes.decrypt(
-    nonce,
-    ciphertext,
+encrypted_challenge = aes.encrypt(
+    challenge_nonce,
+    challenge,
     None
 )
 
-print("[CLIENT]:", plaintext.decode())
-
-# SEND ENCRYPTED REPLY
-reply = "Secure RSA key exchange successful!"
-
-import os
-
-reply_nonce = os.urandom(12)
-
-encrypted_reply = aes.encrypt(
-    reply_nonce,
-    reply.encode(),
-    None
+# SEND NONCE + CIPHERTEXT
+client_socket.send(
+    challenge_nonce + encrypted_challenge
 )
 
-client_socket.send(reply_nonce + encrypted_reply)
+print("[*] Authentication challenge sent.")
 
+# RECEIVE SIGNATURE
+signature = client_socket.recv(4096)
+
+# LOAD CLIENT PUBLIC KEY DIRECTLY
+with open("keys/client_public.pem", "rb") as f:
+    client_public_key = serialization.load_pem_public_key(
+        f.read()
+    )
+
+# VERIFY SIGNATURE
+try:
+
+    client_public_key.verify(
+        signature,
+        challenge,
+        padding.PSS(
+            mgf=padding.MGF1(
+                hashes.SHA256()
+            ),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+
+    print("[+] Client authentication successful.")
+
+    # SEND AUTH SUCCESS
+    success_nonce = os.urandom(12)
+
+    success_message = aes.encrypt(
+        success_nonce,
+        b"AUTH_SUCCESS",
+        None
+    )
+
+    client_socket.send(
+        success_nonce + success_message
+    )
+
+except Exception as e:
+
+    print("[-] Authentication failed.")
+    print(e)
+
+    # SEND AUTH FAILED
+    fail_nonce = os.urandom(12)
+
+    fail_message = aes.encrypt(
+        fail_nonce,
+        b"AUTH_FAILED",
+        None
+    )
+
+    client_socket.send(
+        fail_nonce + fail_message
+    )
+
+# CLOSE CONNECTION
 client_socket.close()
 
 server.close()

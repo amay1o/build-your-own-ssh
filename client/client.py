@@ -11,27 +11,32 @@ from cryptography.hazmat.primitives import serialization
 HOST = "127.0.0.1"
 PORT = 5555
 
+# CREATE CLIENT SOCKET
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 client.connect((HOST, PORT))
 
-# RECEIVE SERVER PUBLIC KEY
-public_key_data = client.recv(4096)
+print("[*] Connected to server.")
 
-public_key = serialization.load_pem_public_key(
-    public_key_data
+# RECEIVE SERVER PUBLIC KEY
+server_public_key_data = client.recv(4096)
+
+server_public_key = serialization.load_pem_public_key(
+    server_public_key_data
 )
 
 print("[*] Server public key received.")
 
-# GENERATE RANDOM AES SESSION KEY
+# GENERATE AES SESSION KEY
 session_key = os.urandom(32)
 
-# ENCRYPT SESSION KEY USING RSA PUBLIC KEY
-encrypted_session_key = public_key.encrypt(
+# ENCRYPT AES KEY USING SERVER RSA PUBLIC KEY
+encrypted_session_key = server_public_key.encrypt(
     session_key,
     padding.OAEP(
-        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+        mgf=padding.MGF1(
+            algorithm=hashes.SHA256()
+        ),
         algorithm=hashes.SHA256(),
         label=None
     )
@@ -42,34 +47,68 @@ client.send(encrypted_session_key)
 
 print("[*] AES session key securely sent.")
 
+# CREATE AES OBJECT
 aes = AESGCM(session_key)
 
-# ENCRYPT MESSAGE USING AES
-message = "Hello from client using RSA key exchange!"
+# LOAD CLIENT PRIVATE KEY
+with open("keys/client_private.pem", "rb") as f:
+    client_private_key = serialization.load_pem_private_key(
+        f.read(),
+        password=None
+    )
 
-nonce = os.urandom(12)
+# =========================
+# AUTHENTICATION PHASE
+# =========================
 
-ciphertext = aes.encrypt(
-    nonce,
-    message.encode(),
+# RECEIVE ENCRYPTED CHALLENGE
+data = client.recv(4096)
+
+challenge_nonce = data[:12]
+
+challenge_ciphertext = data[12:]
+
+# DECRYPT CHALLENGE
+challenge = aes.decrypt(
+    challenge_nonce,
+    challenge_ciphertext,
     None
 )
 
-client.send(nonce + ciphertext)
+print("[*] Authentication challenge received.")
 
-# RECEIVE ENCRYPTED REPLY
-data = client.recv(1024)
+# SIGN CHALLENGE
+signature = client_private_key.sign(
+    challenge,
+    padding.PSS(
+        mgf=padding.MGF1(
+            hashes.SHA256()
+        ),
+        salt_length=padding.PSS.MAX_LENGTH
+    ),
+    hashes.SHA256()
+)
 
-reply_nonce = data[:12]
+# SEND SIGNATURE
+client.send(signature)
 
-reply_ciphertext = data[12:]
+print("[*] Challenge signed and sent.")
 
-reply_plaintext = aes.decrypt(
-    reply_nonce,
-    reply_ciphertext,
+# RECEIVE AUTH RESULT
+response = client.recv(4096)
+
+response_nonce = response[:12]
+
+response_ciphertext = response[12:]
+
+# DECRYPT RESPONSE
+result = aes.decrypt(
+    response_nonce,
+    response_ciphertext,
     None
 )
 
-print("[SERVER]:", reply_plaintext.decode())
+print("[SERVER]:", result.decode())
 
+# CLOSE CONNECTION
 client.close()
